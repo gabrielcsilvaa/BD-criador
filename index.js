@@ -1,23 +1,24 @@
+const ProgressBar = require('progress');
 const { Builder, Browser, By, until } = require("selenium-webdriver");
 const chrome = require("selenium-webdriver/chrome");
 const XLSX = require("xlsx");
 const { format, parse } = require("date-fns");
 const { Pool } = require("pg");
 
-
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-
+// config banco de dados
 const pool = new Pool({
   user: "postgres",
-  host: "192.168.25.83", 
+  host: "192.168.25.83",
   database: "db.pessoaJuridica",
   password: "office",
   port: 5432,
 });
 
+// api do e-kontroll com o metodo listar empresas
 async function listarEmpresas() {
   try {
     const response = await fetch(
@@ -51,17 +52,21 @@ async function consultarCNPJ(driver, cnpj, isFirstRun) {
 
   try {
     await driver.get("https://consultacnpj.com/");
-
     if (isFirstRun) {
-      const termo = await driver.wait(
-        until.elementIsVisible(
-          driver.findElement(
-            By.xpath('//*[@id="modal"]/div/div[2]/div/div[2]/a[1]')
-          )
-        ),
-        10000
-      );
-      await termo.click();
+      try {
+        const termo = await driver.wait(
+          until.elementIsVisible(
+            driver.findElement(
+              By.xpath('//*[@id="modal"]/div/div[2]/div/div[2]/a[1]')
+            )
+          ),
+          10000
+        );
+        await termo.click();
+      } catch (error) {
+        //caso termo for aceito ele nao roda
+        console.log("Não foi possível encontrar o termo de aceite ou já foi aceito anteriormente.");
+      }
     }
 
     const inputCnpj = await driver.findElement(
@@ -81,34 +86,56 @@ async function consultarCNPJ(driver, cnpj, isFirstRun) {
           10000
         );
         const text = await element.getText();
-        console.log(`${description}: ${text}`);
         return text;
       } catch (error) {
-        console.log(`${description} não encontrado.`);
         return "Não encontrado";
       }
     }
 
-    data.Empresa = await getTextIfExists('//*[@id="company-data"]/div[4]/p', "Empresa");
-    data.CNPJ = await getTextIfExists('//*[@id="company-data"]/div[3]/div[1]/p', "CNPJ");
-    const fundacao = await getTextIfExists('//*[@id="company-data"]/div[3]/div[2]/p', "Data de Abertura");
-    const fundacaoFormat = parse(fundacao, "dd/MM/yyyy", new Date());
-    data.DataDeAbertura = format(fundacaoFormat, "yyyy-MM-dd");
+    const empresa = await getTextIfExists('//*[@id="company-data"]/div[4]/p', "Empresa");
+    data.Empresa = empresa;
+    console.log(`Empresa: ${empresa}`);
 
+    const cnpjCompleto = await getTextIfExists('//*[@id="company-data"]/div[3]/div[1]/p', "CNPJ");
+    data.CNPJ = cnpjCompleto;
+    console.log(`CNPJ: ${cnpjCompleto}`);
+
+    const fundacao = await getTextIfExists('//*[@id="company-data"]/div[3]/div[2]/p', "Data de Abertura");
     
+    if (fundacao !== "Não encontrado") {
+      const fundacaoFormat = parse(fundacao, "dd/MM/yyyy", new Date());
+      data.DataDeAbertura = format(fundacaoFormat, "yyyy-MM-dd");
+      console.log(`Data de Abertura: ${fundacao}`);
+    } else {
+      console.log(`Data de Abertura: Não encontrado`);
+    }
+    
+    // for q pega quantos socios tiver 
     for (let i = 1; i <= 20; i++) {
       const socio = await getTextIfExists(`//*[@id="company-data"]/div[13]/div/div[${i}]/div[1]/div[1]/p`, `Sócio ${i}`);
-      if (socio === "Não encontrado") break;
-      data.Socios.push(socio);
+      
+      if (socio === "Não encontrado") {
+        console.log(`Sócio ${i} não encontrado.`);
+        break;
+      }
+      // qualificaçao do socio se ele é adm ou socio etc
+      const qualificacao = await getTextIfExists(`//*[@id="company-data"]/div[13]/div/div[${i}]/div[1]/div[2]/div/p`, `Qualificação ${i}`);
+      
+      console.log(`Sócio ${i}: ${socio}`);
+      console.log(`Qualificação ${i}: ${qualificacao}`);
+      
+      data.Socios.push(`${socio}$${qualificacao}`);
     }
+
+    return data;
+
   } catch (error) {
     console.error("Ocorreu um erro ao consultar o CNPJ: ", error);
+    return data;
   }
-
-  return data;
 }
 
-async function bot() {
+async function bot() {  
   const options = new chrome.Options();
   options.addArguments("--ignore-certificate-errors");
   options.addArguments("--ignore-ssl-errors");
@@ -125,34 +152,50 @@ async function bot() {
 
     const empresas = await listarEmpresas();
     const cnpjs = empresas.map(emp => emp.inscricao_federal);
-    let isFirstRun = true;
+    
+    // barra de progresso, q aparece no console para saber quantas empresas entraram no banco
+    const bar = new ProgressBar('Processando CNPJs [:bar] :current/:total (:percent) - Tempo restante: :etas', {
+      complete: '█',
+      incomplete: '░',
+      width: 40,
+      total: cnpjs.length
+    });
+
+    let isFirstAccess = true;
 
     for (const cnpj of cnpjs) {
-      console.log(`Consultando CNPJ: ${cnpj}`);
+      console.log(`\nConsultando CNPJ: ${cnpj}`);
 
-      const data = await consultarCNPJ(driver, cnpj, isFirstRun);
-      if (data.Empresa !== "Não encontrado" && data.CNPJ !== "Não encontrado") {
-        results.push(data);
+      try {
+        const data = await consultarCNPJ(driver, cnpj, isFirstAccess);
+        
+        if (data.Empresa !== "Não encontrado" && data.CNPJ !== "Não encontrado") {
+          results.push(data);
+        }
+
+        isFirstAccess = false;
+
+        bar.tick();
+
+        await sleep(60000);
+      } catch (cnpjError) {
+        console.error(`Erro no processamento do CNPJ ${cnpj}:`, cnpjError);
+        bar.tick(); 
       }
-      isFirstRun = false;
-
-      await sleep(60000); 
     }
   } catch (error) {
     console.error("Ocorreu um erro no bot: ", error);
   } finally {
-    console.log(results);
+    console.log("\nResultados encontrados:", results.length);
     await driver.quit();
     console.log("Chrome fechado.");
-  }
 
-
-  const maxSocios = Math.max(...results.map(r => r.Socios.length));
+    const maxSocios = Math.max(...results.map(r => r.Socios.length));
 
   try {
     const client = await pool.connect();
 
-    
+    //criando a tabela no banco 
     let createTableQuery = `
       CREATE TABLE IF NOT EXISTS Validar_socios (
         id SERIAL PRIMARY KEY,
@@ -167,6 +210,7 @@ async function bot() {
 
     await client.query(createTableQuery);
 
+    // insertando no banco 
     const insertQuery = `
       INSERT INTO Validar_socios (nome, cnpj, data_abertura${Array.from({ length: maxSocios }, (_, i) => `, socio_${i + 1}`).join('')})
       VALUES (${Array.from({ length: maxSocios + 3 }, (_, i) => `$${i + 1}`).join(', ')})
@@ -180,7 +224,10 @@ async function bot() {
         return null; 
       }
 
-      const sociosArray = Socios.concat(Array(maxSocios - Socios.length).fill("")); //erro
+      const sociosArray = Socios.map(socio => {
+        const [nome, qualificacao] = socio.split('$');
+        return `${nome}$${qualificacao}`;
+      }).concat(Array(maxSocios - Socios.length).fill(""));
       const cnpjLimpo = CNPJ.replace(/\D/g, '').padStart(14, '0').slice(0, 14);
 
       return [Empresa, cnpjLimpo, DataDeAbertura, ...sociosArray];
@@ -190,13 +237,15 @@ async function bot() {
       await client.query(insertQuery, values);
     }
 
-    console.log("Dados inseridos na tabela Validar_socios com sucesso");
+    console.log("Dados inseridos na tabela validar_socios com sucesso");
     client.release();
   } catch (error) {
     console.error("Erro ao criar tabela ou inserir dados no banco de dados:", error);
   } finally {
     await pool.end();
   }
-}
+}}
 
-bot();
+
+// Executa o bot
+bot().catch(console.error);
