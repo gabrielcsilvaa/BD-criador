@@ -1,4 +1,5 @@
-🚀 Descrição do Projeto
+🚀 Descrição do Projeto:
+
 Este projeto implementa uma solução automatizada de inserção de dados empresariais utilizando tecnologias de web scraping e integração de API.
 
 ✨ Principais Características
